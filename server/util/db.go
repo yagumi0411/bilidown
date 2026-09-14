@@ -1,3 +1,6 @@
+// 修改说明（本文件派生自 github.com/iuroc/bilidown，Apache-2.0）：
+// 2026-09-14 CreateLog 同时写入运行目录的 bilidown.log。
+
 package util
 
 import (
@@ -11,6 +14,8 @@ import (
 )
 
 func CreateLog(db *sql.DB, content string) error {
+	// 同时落到 bilidown.log，否则发布版（无控制台）里任务失败的原因只剩数据库这一处
+	log.Println(content)
 	SqliteLock.Lock()
 	_, err := db.Exec(`INSERT INTO "log" ("content") VALUES (?)`, content)
 	SqliteLock.Unlock()

@@ -1,3 +1,6 @@
+// 修改说明（本文件派生自 github.com/iuroc/bilidown，Apache-2.0）：
+// 2026-09-14 Start() 增加 panic 兜底：记录调用栈并把任务标记为失败。
+
 package task
 
 import (
@@ -13,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,6 +105,17 @@ func (task *Task) Create(db *sql.DB) error {
 
 // Create 创建任务，并将任务加入全局任务列表
 func (task *Task) Start() {
+	// 下载跑在独立 goroutine 里，发布版没有控制台，未捕获的 panic 会静默杀掉整个进程。
+	// 这里兜住：连同调用栈写进日志，并把任务标记为失败。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Task-%d-Panic: %v\n%s", task.ID, r, debug.Stack())
+			db := util.MustGetDB()
+			defer db.Close()
+			task.UpdateStatus(db, "error", fmt.Errorf("发生 panic: %v", r))
+		}
+	}()
+
 	if task.DownloadType == "" {
 		task.DownloadType = "merge"
 	}

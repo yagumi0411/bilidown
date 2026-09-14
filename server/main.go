@@ -1,9 +1,13 @@
+// 修改说明（本文件派生自 github.com/iuroc/bilidown，Apache-2.0）：
+// 2026-09-14 新增 initLogger()，日志写入运行目录的 bilidown.log。
+
 package main
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,9 +32,30 @@ var urlLocal = fmt.Sprintf("http://127.0.0.1:%d", HTTP_PORT)
 var urlLocalUnix = fmt.Sprintf("%s?___%d", urlLocal, time.Now().UnixMilli())
 
 func main() {
+	initLogger()
+	if wd, err := os.Getwd(); err == nil {
+		log.Printf("Bilidown %s 启动，工作目录: %s", VERSION, wd)
+	}
 	checkFFmpeg()
 	// 启动托盘程序
 	systray.Run(onReady, nil)
+}
+
+// initLogger 把日志同时写到控制台和运行目录下的 bilidown.log。
+// 发布版用 -H windowsgui 构建、没有控制台，这个文件是唯一的排查入口。
+func initLogger() {
+	file, err := os.OpenFile("bilidown.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("无法打开 bilidown.log: %v，日志将只输出到控制台", err)
+		return
+	}
+	// 顺序很关键：io.MultiWriter 遇到第一个写失败就中止，
+	// -H windowsgui 构建的进程被双击/Start-Process 拉起时没有有效的 stderr 句柄，
+	// 写 stderr 必然失败。文件放前面才能保证日志一定落盘。
+	// 从终端启动时，文件之后的 stderr 仍能正常输出。
+	log.SetOutput(io.MultiWriter(file, os.Stderr))
+	// 每行带上 2006/01/02 15:04:05 时间戳
+	log.SetFlags(log.LstdFlags)
 }
 
 func onReady() {
@@ -54,7 +79,7 @@ func onReady() {
 // checkFFmpeg 检测 ffmpeg 的安装情况，如果未安装则打印提示信息。
 func checkFFmpeg() {
 	if _, err := util.GetFFmpegPath(); err != nil {
-		fmt.Println("🚨 FFmpeg is missing. Install it from https://www.ffmpeg.org/download.html or place it in ./bin, then restart the application.")
+		log.Println("🚨 FFmpeg is missing. Install it from https://www.ffmpeg.org/download.html or place it in ./bin, then restart the application.")
 		select {}
 	}
 }
@@ -90,7 +115,7 @@ func openBrowser(url string) {
 	if err := cmd.Start(); err != nil {
 		log.Printf("openBrowser: %v.", err)
 	}
-	fmt.Printf("Opened in default browser: %s.\n", url)
+	log.Printf("Opened in default browser: %s.", url)
 }
 
 // setIcon 设置托盘图标

@@ -1,8 +1,56 @@
-# Bilidown
-
-[![GitHub Release](https://img.shields.io/github/v/release/iuroc/bilidown)](https://github.com/iuroc/bilidown/releases)
+# Bilidown（个人修改版）
 
 哔哩哔哩视频解析下载工具，支持 8K 视频、Hi-Res 音频、杜比视界下载、批量解析，可扫码登录，常驻托盘。
+
+> 本项目是 [iuroc/bilidown](https://github.com/iuroc/bilidown) 的个人分支，基于 `v2.1.1`。
+> 原项目采用 Apache-2.0 许可，本分支沿用同一许可，著作权归原作者所有。
+> 改动过的文件在文件头部都标注了修改说明。
+
+## 声明
+
+本分支的代码改动由 **deepseek-v4.1flash** 完成。
+
+## 本分支的改动
+
+### 1. 修复大文件下载到约 92% 中断（主要改动）
+
+原版用 Go 默认启用的 HTTP/2 下载媒体流。B 站 CDN 会在传输中途发送
+`RST_STREAM(INTERNAL_ERROR)` 重置连接，Go 客户端抛出：
+
+```
+stream error: stream ID 1; INTERNAL_ERROR; received from peer
+```
+
+实测同一个视频连续两次分别停在 **91.9%** 和 **92.6%**（约 74MB / 80MB 处），
+而且没有任何重试机制——已下载的部分被整个丢弃，任务直接判失败。
+一个 2 小时视频的音频部分，下到 74MB 时一条连接被重置，整个任务就废了。
+
+**改动**（`server/bilibili/client.go`）：显式关闭 HTTP/2，媒体下载改走 HTTP/1.1，
+同时复用 Transport 拿到连接复用与 DNS 缓存。
+
+改动后同一个用例重下成功：产物 2,012,929,389 字节，fMP4 的 box 结构校验完整无截断。
+
+### 2. 失败原因写入日志文件
+
+发布版没有控制台，任务标红之后无从查起。现在标准库 `log` 的输出会同步追加写入
+运行目录下的 `bilidown.log`，每行带时间戳：
+
+```
+2026/09/14 21:01:51 Task-6-Error: DownloadMedia: Get "https://...": dial tcp ...: connection refused
+2026/09/14 21:01:24 Bilidown v2.1.1 启动，工作目录: D:\Tools\bilidown_Windows_x86_64
+```
+
+覆盖下载失败、合并失败、元数据写入失败、启动信息等。任务失败的原因同时保留在
+数据库的 `log` 表里。
+
+### 3. 下载 goroutine 的 panic 兜底
+
+下载跑在独立 goroutine 里，未捕获的 panic 会**静默杀掉整个进程**。
+现在会连同调用栈一起写进日志，并把任务标记为失败，进程继续存活。
+
+### 4. 发布形态
+
+构建时加 `-ldflags "-H windowsgui"`，双击运行不再弹出黑色控制台窗口。
 
 ## 支持解析的链接类型
 
@@ -12,19 +60,56 @@
 -   【收藏夹】https://space.bilibili.com/1176277996/favlist?fid=1234122612
 -   【UP 主空间地址】等待 3.x 版本支持
 
-## 使用说明
+## 构建与运行（Windows）
 
-1. 从 [Releases](https://github.com/iuroc/bilidown/releases) 下载适合您系统版本的安装包
-2. 非 Windows 系统，请先安装 [FFmpeg 工具](https://www.ffmpeg.org/)
-3. 将安装包解压后执行即可
+本分支不发布预编译安装包，自行构建。
 
-## 第三方客户端
+### 1. 构建后端
 
-感谢社区开发者对 Bilidown 的支持。
+需要 [Go](https://go.dev/dl/) 1.23 或更高版本。
 
-- **bilidown-for-mac**（macOS 原生客户端）
-  - 项目地址：https://github.com/Qwehhh2233/bilidown-for-mac
-  - 基于 Bilidown 后端实现，由社区开发者维护，为 macOS 用户提供原生客户端体验
+```shell
+cd server
+set CGO_ENABLED=0
+go build -ldflags "-H windowsgui" -o bilidown.exe .
+```
+
+Windows 上三个依赖（`getlantern/systray`、`modernc.org/sqlite`、`skip2/go-qrcode`）
+都是纯 Go，`CGO_ENABLED=0` 实测可行。
+Linux 下 systray 需要 CGO，另需 `pkg-config`、`gcc`、`libayatana-appindicator3-dev`。
+
+### 2. 构建前端（可选）
+
+仓库里不含构建好的前端产物（`static/` 已被 `.gitignore` 排除），需要自己构建一次：
+
+```shell
+cd client
+pnpm install
+pnpm build
+```
+
+产物会输出到 `server/static`（见 `client/vite.config.ts`）。不改前端的话，这一步只需做一次。
+
+### 3. 准备运行目录
+
+程序里 `static/`、`bin/ffmpeg`、`data.db` 都是**相对当前工作目录**查找的，
+所以下面这些文件必须和 exe 放在同一个目录：
+
+```
+bilidown.exe      构建产物
+static/           前端产物（第 2 步的输出）
+bin/ffmpeg.exe    合流工具；装在 PATH 里也可以
+data.db           首次运行自动创建
+download/         下载输出目录，可在设置里改
+```
+
+### 4. 运行
+
+双击 `bilidown.exe`。托盘出现图标，浏览器自动打开 <http://127.0.0.1:8098>。
+
+**注意**：用快捷方式启动时，"起始位置"必须指向 exe 所在目录；
+从命令行启动要先 `cd` 过去。否则程序会在错误的位置新建一个空的 `data.db`，
+任务列表和登录状态全部丢失。
 
 ## 软件特色
 
@@ -35,93 +120,11 @@
 ## 其他说明
 
 -   本程序不支持也不建议 HTTP 代理，直接使用国内网络访问能提升批量解析的成功率和稳定性。
-
-## 打包可执行文件
-
-```shell
-git clone https://github.com/iuroc/bilidown
-cd bilidown/client
-pnpm install
-pnpm build
-cd ../server
-go mod tidy
-CGO_ENABLED=1 go build
-```
-
-## 交叉编译
-
-### 说明
-
--   镜像名称：`iuroc/cgo-cross-build`
--   支持的系统架构
-    -   `linux/amd64`
-    -   `windows/amd64`
-    -   `windows/386`
-    -   `windows/arm64`
-    -   `darwin/amd64`
-    -   `darwin/arm64`
-
-### 拉取镜像和项目源码
-
-```shell
-docker pull iuroc/cgo-cross-build:latest
-git clone https://github.com/iuroc/bilidown
-```
-
-### 交叉编译发行版
-
-> 执行 `goreleaser` 命令时将自动执行 `pnpm build` 和 `go mod tidy`
-
-将 `ffmpeg.exe` 放入 `server/bin` 目录内。
-
-在项目根目录执行如下代码，进入 Docker 容器。
-
-```shell
-docker run --rm -it -v .:/usr/src/data iuroc/cgo-cross-build
-```
-
-在容器内的终端执行如下代码，开始交叉编译。
-
-```shell
-cd server
-git tag v2.1.1
-goreleaser release --snapshot --clean
-# 正式发行
-# GITHUB_TOKEN=xxx goreleaser release --clean
-```
-
-### 编译指定系统架构
-
-```ini
-# 按上面的步骤进入 Docker 容器内终端
-
-# [darwin-amd64]
-GOOS=darwin
-GOARCH=amd64
-CC=o64-clang
-CGO_ENABLED=1
-go build
-```
-
-### 非 Docker 环境编译
-
-在 Linux amd64 平台上执行 `go build` 时，您可能需要安装以下依赖包：  
-
-```bash
-sudo apt install pkg-config gcc libayatana-appindicator3-dev
-```
-
-## 开发环境
-
-```bash
-# client
-pnpm install
-pnpm dev
-# server
-go build && ./bilidown
-```
+-   直链带 2 小时有效期，批量下载超过 2 小时需要重新解析。
 
 ## 特别感谢
+
+本项目基于 [iuroc/bilidown](https://github.com/iuroc/bilidown)，感谢原作者及以下开源项目：
 
 -   [twbs/bootstrap](https://github.com/twbs/bootstrap) - 前端开发必备的响应式框架，简化页面布局
 -   [vanjs-org/van](https://github.com/vanjs-org/van) - 轻量级的前端框架，专注于构建高效应用
@@ -138,7 +141,6 @@ go build && ./bilidown
 
 ![](./docs/2024-11-05_090604.png)
 
+## 许可
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=iuroc/bilidown&type=Date)](https://www.star-history.com/#iuroc/bilidown&Date)
+[Apache License 2.0](LICENSE)，同上游项目。

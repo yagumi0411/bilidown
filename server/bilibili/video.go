@@ -1,9 +1,13 @@
+// 修改说明（本文件派生自 github.com/iuroc/bilidown，Apache-2.0）：
+// 2026-09-14 收藏夹重试中被吞掉的错误改用 log 输出，便于排查。
+
 package bilibili
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -177,7 +181,7 @@ func (client *BiliClient) GetFavlist(mediaId int) (*FavList, error) {
 	for {
 		favList, hasMore, err := client.GetFavlistByPage(mediaId, page, 40)
 		if err != nil {
-			fmt.Println(err.Error())
+			log.Println(err.Error())
 			if retry == 5 || strings.HasPrefix(err.Error(), "body.Code not 0") {
 				return nil, err
 			}

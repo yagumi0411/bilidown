@@ -1,12 +1,18 @@
+// 修改说明（本文件派生自 github.com/iuroc/bilidown，Apache-2.0）：
+// 2026-09-14 关闭 HTTP/2 并复用 Transport，修复大文件下载到约 92% 被 CDN 重置的问题。
+
 package bilibili
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
+	"time"
 
 	"bilidown/util"
 )
@@ -15,23 +21,46 @@ type BiliClient struct {
 	SESSDATA string
 }
 
+// httpClient 是全局复用的 HTTP 客户端。
+//
+// 为什么要显式禁用 HTTP/2：
+// 项目原来每次请求都新建 &http.Transport{Proxy: ...}，本意只是禁用代理。但 Go 对
+// 手工构造的 Transport 会在「未提供自定义 Dial/TLSClientConfig」时自动尝试 HTTP/2
+// （ForceAttemptHTTP2 的零值语义是「自动尝试」，不是「禁用」），于是媒体下载走了 h2。
+// B 站 CDN 的 h2 长连接会在传输中途发 RST_STREAM(INTERNAL_ERROR)，表现为
+// "stream error: stream ID N; INTERNAL_ERROR; received from peer"，大文件下到一半即失败。
+// 把 TLSNextProto 设为非 nil 的空 map 是官方文档指定的关闭 HTTP/2 的方法。
+// 参考：golang/go#51323
+//
+// 全局复用还顺带获得连接复用与 DNS 缓存，批量解析更快。
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyURL(nil),
+		// 非 nil 的空 map = 不装配 HTTP/2
+		TLSNextProto:        make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 // SimpleGET 简单的 GET 请求
 func (client *BiliClient) SimpleGET(_url string, params map[string]string) (*http.Response, error) {
 	values := url.Values{}
 	for k, v := range params {
 		values.Set(k, v)
 	}
-	_client := http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(nil),
-		},
+	// 无参数时不要留下孤立的 "?"，保证请求 URL 与正常预期完全一致
+	requestURL := strings.TrimSuffix(_url, "?")
+	if query := values.Encode(); query != "" {
+		requestURL = requestURL + "?" + query
 	}
-	request, err := http.NewRequest("GET", _url+"?"+values.Encode(), nil)
+	request, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header = client.MakeHeader()
-	return _client.Do(request)
+	return httpClient.Do(request)
 }
 
 // MakeHeader 生成请求头
